@@ -7,6 +7,10 @@ This is the official [Container Storage Interface](https://github.com/container-
 * [Supported Features](#Supported-Features)
 * [Installation](#Installation)
 * [CSI Driver Configuration](#CSI-Driver-Configuration)
+    * [Backend](###Backend)
+    * [Secert](###Secert)
+    * [StorageClass](###StorageClass)
+    * [PVC](###PVC)
 * [Deployment](#Deployment)
 * [Operations](#Operations) 
 
@@ -32,7 +36,7 @@ Figure 1. Process of creating a volume with the QNAP CSI driver.
 ### CSI Driver Version and Compatibility  
 | **Driver Version** | **Supported Kubernetes Versions** | **Supported QNAP NAS Operating Systems**                |  
 |------------------- | --------------------------------- | ------------------------------------- | 
-| v1.5.0             | v1.24 to v1.32                    | QTS 5.0.0 or later<br>QuTS hero h5.0.0 or later|
+| v1.6.0             | v1.24 to v1.35                    | QTS 5.1.0 or later<br>QuTS hero h5.1.0 or later|
  
 ### Supported Host Operating Systems  
 - Debian 8 or later  
@@ -49,25 +53,62 @@ Figure 1. Process of creating a volume with the QNAP CSI driver.
 <a name="Supported-Features"></a> 
 ## Supported Features 
 
-* Protocol: iSCSI, Samba
+* Protocol: iSCSI, SMB
+* High Availability: iSCSI Multipath support
+* Security: iSCSI CHAP Authentication
 * Access mode: ReadWriteOnce, ReadWriteMany
-* Cloning  
-* Snapshots
-* Expansion
+* Data Services: Snapshots, Cloning, Expansion
 * Pool level: RAID levels, SSD cache, Tiering
-* Volume level: Threshold, ThinAllocate, Compression, Deduplication
+* Optimization: Thin Provisioning, Deduplication, Compression, Thresholds
 
 <a name="Installation"></a> 
 ## Installation
 ### Preinstallation Checklist
 
 * Ensure that both the Kubernetes and the QNAP NAS operating system versions are supported.
+
 > [!NOTE] 
-> Minikube is not supported.
-* If the iSCSI protocol is utilized. Install open-iscsi in Kubernetes by running the following command in both the master and worker nodes: 
-  ``` 
-  sudo apt install open-iscsi 
-  ``` 
+> - Minikube is not supported.
+> - On Rancher-managed clusters, the driver auto-detects the Rancher environment and completes all Rancher-specific tasks automatically.  
+* If you plan to use the iSCSI protocol, you must install the required iSCSI utilities on all Kubernetes master and worker nodes. You can choose to use a single-path iSCSI setup for basic connectivity, or a multipath iSCSI setup if you require path redundancy, load balancing, or improved performance.
+    * Single-Path iSCSI Setup
+      ``` 
+      sudo apt install open-iscsi 
+      ``` 
+    * Multipath iSCSI Setup
+      Install the required packages
+      ```
+      sudo apt-get install -y open-iscsi lsscsi sg3-utils multipath-tools scsitools
+      ```
+      Set scanning to manual
+      ```
+      sudo sed -i 's/^\(node.session.scan\).*/\1 = manual/' /etc/iscsi/iscsid.conf
+      ```
+      Create or edit the multipath configuration file
+      ```
+      sudo tee /etc/multipath.conf <<-EOF
+      defaults {
+          user_friendly_names yes
+          find_multipaths no
+      }
+      EOF
+      ```
+      >[!NOTE] 
+      >Ensure that /etc/multipath.conf contains find_multipaths no under defaults.
+      
+      Enable and start the multipath service
+      ```
+      sudo systemctl enable --now multipath-tools.service
+      sudo service multipath-tools restart
+      ```
+      Verify that both services are active
+      ```
+      sudo systemctl status multipath-tools
+      sudo systemctl status open-iscsi
+      sudo systemctl status multipath-tools
+      ```
+
+
 * Verify that your NAS has at least one available storage pool and iSCSI service is enabled. 
    - To check storage pools on your NAS, open Storage & Snapshots and navigate to "Storage > Storage/Snapshots".
    - If the iSCSI protocol is utilized. To check iSCSI service on your NAS, open iSCSI & Fibre Channel and verify that the "Service" toggle switch is on. 
@@ -97,6 +138,7 @@ Figure 1. Process of creating a volume with the QNAP CSI driver.
     A successful test will display packet responses, indicating connectivity. The pod will automatically delete itself after completion.
 </details>
 
+    
 ### Install the QNAP CSI Plugin 
 1. Clone the git repository.  
     ``` 
@@ -176,6 +218,11 @@ kubectl apply -k VolumeSnapshot
 To ensure the CSI driver functions correctly, it is important to configure the backend, secert (Optional), StorageClass, and PVC with matching labels and parameters to enable proper binding. The backend defines the virtual storage pools and connects the underlying physical resources, the secret is required when the Samba protocol is utilized for connection, while the StorageClass specifies the QoS that the PVC will request. 
 
 For binding to succeed, the PVC must reference a StorageClass that has the correct labels and selectors, which correspond to the virtual pools defined in the backend. Accurate configuration of names, labels, and selectors in each component is essential to ensure the PVC is correctly bound to the appropriate storage resources through the backend and StorageClass.
+    
+> [!WARNING]
+> Avoid modifying CSI-provisioned resources directly through the UI.
+> Changes made outside the CSI workflow may cause configuration mismatches between components and lead to unexpected behavior.
+
 
 ### Backend
 There are two methods for configuring the backend: 
@@ -201,7 +248,14 @@ Please refer to the following examples.
       stringData:
         username: user # Required. Your NAS username.
         password: 0000 # Required. Your NAS password.
+        chapInitiatorUsername: <initiator_username> # Optional. Username used by the initiator to authenticate to the target.
+        chapInitiatorPassword: <initiator_password> # Optional. Password for the initiator’s CHAP authentication. 
+        chapTargetUsername: <target_username> # Optional. Username used by the target to authenticate back to the initiator (for mutual CHAP).
+        chapTargetPassword: <target_password> # Optional. Password for the target’s CHAP authentication (for mutual CHAP). 
         storageAddress: 0.0.0.0 # Required. Your NAS IP address.
+        https: false # Optional. Whether to enable a secure connection. Default: False.
+        port: 8080 # Optional. Specify the port. Default: 8080.
+        trustedCACertificate: <Base64-encoded-trusted-ca-certificate-for-backend> # Optional. Base64-encoded value of trusted CA certificate. Used for certificate-based authentication. 
       ---
       apiVersion: trident.qnap.io/v1
       kind: TridentBackendConfig
@@ -213,6 +267,7 @@ Please refer to the following examples.
         storageDriverName: qnap-nas #Required. Support 'qnap-nas'(latest) or 'qnap-iscsi'
         backendName: qts # Required. Name your backend in QNAP CSI.
         networkInterfaces: ["Adapter1"] # Optional. Your adapter name or leave it empty.
+        userCHAP: true # Optional. Enables CHAP authentication for iSCSI connections. 
         credentials:
           name: backend-qts-secret # Required. Enter the secret name set in metadata.name.
         debugTraceFlags:
@@ -242,7 +297,15 @@ Please refer to the following examples.
           "storageAddress": "0.0.0.0",
           "username": "user",
           "password": "0000",
+          "chapInitiatorUsername": "<initiator_username>",
+          "chapInitiatorPassword": "<initiator_password>",
+          "chapTargetUsername": "<target_username>",
+          "chapTargetPassword": "<target_password>", 
+          "https": "false",
+          "port": "8080",
+          "trustedCACertificate": "<Base64-encoded-trusted-ca-certificate-for-backend>" 
           "networkInterfaces": ["Adapter1"], 
+          "useCHAP": "true",
           "debugTraceFlags": {"method": true},
           "storage": [
               {
@@ -267,11 +330,20 @@ Please refer to the following examples.
 
 2. In the YAML or JSON file, configure the following based on your NAS settings and usage requirements.
     * Specify the correct NAS `user`, `password`, and `IP address`.
+    * Optionally, use the `useCHAP` field to enable CHAP authentication. Providing both Initiator and Target credentials in the Secret enables mutual CHAP. For one-way CHAP, set only the Initiator credentials.
+    * Optionally enable HTTPS and configure the service port and trusted CA certificate according to your requirements.
     * Name the secret and backend.
     * Optional: Set the network portal in the `networkInterfaces` field.
 
-      > **Note:**<br>
-      > Network settings support physical and virtual adapters. In the `networkInterfaces` field, assign an interface name (e.g., \["Adapter1"\]) or leave it empty to default to `storageAddress`. To view the available adapters on your NAS, open Network & Virtual Switch and go to "Interfaces".
+      > [!Note]
+      > Network settings support physical and virtual adapters. In the networkInterfaces field, assign one or multiple interface names (e.g., ["Adapter1", "Adapter2"]), or leave it empty to default to `storageAddress`. To view the available adapters on your NAS, open Network & Virtual Switch and go to "Interfaces".
+      > <br>If you plan to use multipath, consider the following requirements:
+      > - Configure multipath on your Kubernetes nodes. (Refer to [Installation](#Installation))
+      > - Specify more than one interface in `networkInterfaces`to enable redundant paths.
+      > - Use interfaces on different subnets or uplinks to improve availability and, when supported by the workload and OS policies, achieve better path distribution.
+      >
+      > Multipath enhances reliability by providing multiple independent I/O paths. Its performance benefits depend on proper network topology, path separation, and node-side configuration.
+
       
     * Define the virtual pools based on your usage requirements.
       | Field                       | Description            | Example | 
@@ -306,7 +378,7 @@ stringData:
 ### StorageClass 
 1. Create or edit the YAML file.<br>
     
-    iSCSI: `Samples/StorageClass/sc_iscsi_sample.yaml`.<br>
+    **iSCSI Protocol**: `Samples/StorageClass/sc_iscsi_sample.yaml`.<br>
     
     Example:
     ```yaml  
@@ -318,9 +390,10 @@ stringData:
     parameters:
       selector: "performance=performance1" # Required. Corresponds to the labels in the virtual pool.
       fsType: "ext4" # Optional. You can choose to enter ext4 (default), xfs, or ext3.
+      replacementTimeout: '120' # Optional. Define the iSCSI timeout, with a default value of 120 seconds 
     allowVolumeExpansion: true
     ``` 
-    Samba: `Samples/StorageClass/sc_smb_sample.yaml`.<br>
+    **SMB Protocol**: `Samples/StorageClass/sc_smb_sample.yaml`.<br>
     
     Example:
     

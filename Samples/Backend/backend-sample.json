@@ -1,11 +1,19 @@
 {
     "version": 1,
-    "storageDriverName": "qnap-iscsi",
+    "storageDriverName": "qnap-nas",
     "backendName": "qts",
     "storageAddress": "0.0.0.0",
     "username": "user",
     "password": "0000",
+    "chapInitiatorUsername": "<initiator_username>",
+    "chapInitiatorPassword": "<initiator_password>",
+    "chapTargetUsername": "<target_username>",
+    "chapTargetPassword": "<target_password>", 
+    "https": "false",
+    "port": "8080",
+    "trustedCACertificate": "<Base64-encoded-trusted-ca-certificate-for-backend>" 
     "networkInterfaces": ["Adapter1"], 
+    "useCHAP": "true",
     "debugTraceFlags": {"method": true},
     "storage": [
         {
